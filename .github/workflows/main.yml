@@ -1,0 +1,4 @@
+audio-separator-bot/
+└── .github/
+    └── workflows/
+        └── bot.yml

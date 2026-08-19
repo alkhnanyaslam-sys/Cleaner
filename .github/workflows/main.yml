@@ -1,4 +1,79 @@
-audio-separator-bot/
-└── .github/
-    └── workflows/
-        └── bot.yml
+name: Run Audio Separator Bot
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Runs every 6 hours. Each run polls for ~5h50m then exits cleanly,
+    # and the next scheduled trigger picks up right after.
+    - cron: "0 */6 * * *"
+
+# Prevents two runs from polling Telegram at the same time (409 Conflict).
+concurrency:
+  group: audio-separator-bot
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Cache Demucs model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/torch
+          key: demucs-model-${{ hashFiles('config.py') }}
+
+      # Persists the SQLite database (stats/users/bans) between workflow
+      # runs, since GitHub Actions runners are otherwise fully ephemeral.
+      - name: Restore database
+        uses: actions/cache/restore@v4
+        with:
+          path: database
+          key: bot-db-${{ github.run_id }}
+          restore-keys: |
+            bot-db-
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          ADMIN_IDS: ${{ secrets.ADMIN_IDS }}
+          DATABASE_URL: database/bot.db
+          MAX_FILE_SIZE_MB: 50
+          MAX_DURATION_SECONDS: 600
+          MAX_WORKERS: 1
+          MAX_CONCURRENT_PER_USER: 1
+          MAX_JOBS_PER_USER_DAILY: 10
+          MODEL_NAME: htdemucs
+          TEMP_DIR: temp
+          RESULT_TTL_MINUTES: 30
+          RUN_DURATION_MINUTES: 350
+        run: python main.py
+
+      # Save the (possibly updated) database so the next run can restore it.
+      - name: Save database
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: database
+          key: bot-db-${{ github.run_id }}

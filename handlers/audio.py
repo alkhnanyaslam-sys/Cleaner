@@ -6,6 +6,7 @@ import os
 import uuid
 
 from aiogram import Router, F, Bot
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message, CallbackQuery, FSInputFile
 
 from config import config
@@ -23,6 +24,16 @@ router = Router(name="audio")
 
 # job_id -> {"vocals": path, "instrumental": path, "dir": path}
 _job_results: dict = {}
+
+
+async def _safe_edit(message: Message, text: str):
+    """Edits a message's text, silently ignoring Telegram's
+    'message is not modified' error when the text hasn't actually changed."""
+    try:
+        await message.edit_text(text)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
 
 
 def _get_file_meta(message: Message):
@@ -75,15 +86,10 @@ async def handle_media(message: Message, bot: Bot):
     await db.create_job(job_id, user_id)
 
     async def status_callback(status: str):
-        text_map = {
-            "processing": "⚙️ جاري تحليل الصوت...",
-            "failed": "❌ حدث خطأ أثناء المعالجة. حاول لاحقًا.",
-        }
-        if status in text_map:
-            try:
-                await status_msg.edit_text(text_map[status])
-            except Exception:
-                pass
+        # Only handle the "failed" case here; the "processing" text is set
+        # directly inside _process_job to avoid a duplicate identical edit.
+        if status == "failed":
+            await _safe_edit(status_msg, "❌ حدث خطأ أثناء المعالجة. حاول لاحقًا.")
 
     async def job_coro():
         await _process_job(bot, message, job_id, file_id, file_name, status_msg)
@@ -98,9 +104,9 @@ async def _process_job(bot: Bot, message: Message, job_id: str, file_id: str,
     os.makedirs(job_dir, exist_ok=True)
 
     try:
-        raw_path = await download_telegram_file(bot, file_id, file_name, job_dir)
+        await _safe_edit(status_msg, "⚙️ جاري تحليل الصوت...")
 
-        await status_msg.edit_text("⚙️ جاري تحليل الصوت...")
+        raw_path = await download_telegram_file(bot, file_id, file_name, job_dir)
 
         wav_input = os.path.join(job_dir, "input.wav")
         if is_video_extension(file_name):
@@ -110,7 +116,8 @@ async def _process_job(bot: Bot, message: Message, job_id: str, file_id: str,
 
         duration = await ffmpeg_service.probe_duration(wav_input)
         if duration > config.MAX_DURATION_SECONDS:
-            await status_msg.edit_text(
+            await _safe_edit(
+                status_msg,
                 f"⚠️ مدة الملف ({int(duration // 60)} دقيقة) أكبر من الحد المسموح "
                 f"({config.MAX_DURATION_SECONDS // 60} دقيقة)."
             )
@@ -118,13 +125,13 @@ async def _process_job(bot: Bot, message: Message, job_id: str, file_id: str,
             delete_path(job_dir)
             return
 
-        await status_msg.edit_text("🎛️ جاري فصل الصوت...")
+        await _safe_edit(status_msg, "🎛️ جاري فصل الصوت...")
 
         vocals_path, instrumental_path, processing_time = await separate(
             wav_input, job_dir, config.MODEL_NAME
         )
 
-        await status_msg.edit_text("📤 جاري رفع النتيجة...")
+        await _safe_edit(status_msg, "📤 جاري رفع النتيجة...")
 
         _job_results[job_id] = {
             "vocals": vocals_path,
@@ -132,7 +139,7 @@ async def _process_job(bot: Bot, message: Message, job_id: str, file_id: str,
             "dir": job_dir,
         }
 
-        await status_msg.edit_text("✅ اكتملت المعالجة.")
+        await _safe_edit(status_msg, "✅ اكتملت المعالجة.")
         await message.answer(
             "🎉 تم فصل الصوت بنجاح! اختار إيه اللي عايز تحمله:",
             reply_markup=result_kb(job_id),
@@ -143,7 +150,7 @@ async def _process_job(bot: Bot, message: Message, job_id: str, file_id: str,
 
     except Exception:
         logger.exception(f"Job {job_id} processing failed")
-        await status_msg.edit_text("❌ حدث خطأ أثناء المعالجة. حاول بملف آخر أو لاحقًا.")
+        await _safe_edit(status_msg, "❌ حدث خطأ أثناء المعالجة. حاول بملف آخر أو لاحقًا.")
         await db.finish_job(job_id, success=False, error="processing_error")
         delete_path(job_dir)
 
